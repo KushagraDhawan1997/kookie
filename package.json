@@ -1,0 +1,28 @@
+{
+  "name": "kookie",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3010",
+    "build": "next build",
+    "start": "next start",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@kushagradhawan/kookie-ui-react": "file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.1.tgz",
+    "next": "^16.3.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^6.0.3"
+  },
+  "packageManager": "pnpm@12.4.1",
+  "engines": {
+    "node": ">=24"
+  }
+}
