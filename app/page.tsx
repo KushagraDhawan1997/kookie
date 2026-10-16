@@ -1,6 +1,6 @@
 import { Box, Heading, Link, Page, Stack, Text } from "@kushagradhawan/kookie-ui-react";
 
-import { DESCRIPTION, LEGACY, PRODUCTS, SITE_NAME, type Product } from "./site";
+import { DESCRIPTION, PRODUCTS, SITE_NAME, type Product } from "./site";
 
 const INTRO =
   "Kookie is a set of creative tools made by Kushagra Dhawan, with the libraries they are built on. A tool is made only when it is needed, and each one is kept to a high standard.";
@@ -37,13 +37,6 @@ export default function Home() {
                   <ProductRow key={product.name} product={product} />
                 ))}
               </Stack>
-            </Stack>
-
-            <Stack gap="4">
-              <Heading size="5" render={<h2 />}>
-                Also maintained
-              </Heading>
-              <ProductRow product={LEGACY} />
             </Stack>
           </Stack>
         </Page>

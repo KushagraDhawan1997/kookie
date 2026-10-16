@@ -27,11 +27,10 @@ export const PRODUCTS: readonly Product[] = [
     // On GitHub until it launches.
     href: "https://github.com/KushagraDhawan1997/kookie-flow/tree/main/apps/studio",
   },
+  {
+    // Kookie UI v1, still maintained for Womp. A product in its own right, not a footnote.
+    name: "Womp's Design System",
+    blurb: "The React components that every screen in Womp is built from.",
+    href: "https://womp-ui.kookie.design",
+  },
 ];
-
-/** The older system, still maintained for Womp. Listed apart from the products above. */
-export const LEGACY: Product = {
-  name: "Womp's Design System",
-  blurb: "The component package behind Womp's interface, built on Kookie UI v1.",
-  href: "https://womp-ui.kookie.design",
-};
