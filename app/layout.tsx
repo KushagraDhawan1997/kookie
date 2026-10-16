@@ -74,7 +74,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <Theme appearance="inherit" size="3" material="regular">
+        <Theme appearance="inherit" size="3" material="3">
           {children}
         </Theme>
       </body>
