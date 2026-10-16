@@ -170,8 +170,8 @@ importers:
         specifier: ^5.3.0
         version: 5.3.0
       '@kushagradhawan/kookie-ui-react':
-        specifier: file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.1.tgz
-        version: file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.1.tgz(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+        specifier: file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.2.tgz
+        version: file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.2.tgz(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       next:
         specifier: ^16.3.5
         version: 16.4.0(@types/node@26.6.5)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -411,9 +411,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@kushagradhawan/kookie-ui-react@file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.1.tgz':
-    resolution: {integrity: sha512-ZPGsnnAlyHZm/fhXycNkYZ5/0WWwyh0KrNop28N0yWamGdztI5wnXtPZhc4rqGU9rezar3r5Iyz0HvIYFjXEAg==, tarball: file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.1.tgz}
-    version: 0.0.0-site.1
+  '@kushagradhawan/kookie-ui-react@file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.2.tgz':
+    resolution: {integrity: sha512-hDowmxgveoyAzVnPdFp11/CKU/xWEEp0oyl3SpUE0JCSoCwhEygP60FiFTVejlRyeZzpj36ub2riFbz2V7YIxQ==, tarball: file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.2.tgz}
+    version: 0.0.0-site.2
     hasBin: true
     peerDependencies:
       react: ^19.0.0
@@ -770,7 +770,7 @@ snapshots:
   '@img/sharp-win32-x64@0.35.5':
     optional: true
 
-  '@kushagradhawan/kookie-ui-react@file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.1.tgz(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
+  '@kushagradhawan/kookie-ui-react@file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.2.tgz(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
     dependencies:
       '@base-ui/react': 1.7.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@shadcn/react': 0.3.1(@types/react@19.3.0)(react@19.3.0)
