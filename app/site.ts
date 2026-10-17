@@ -13,7 +13,7 @@ export type Product = {
 export const PRODUCTS: readonly Product[] = [
   {
     name: "Kookie UI",
-    blurb: "A design system for React with strict rules, so every screen stays consistent.",
+    blurb: "A design system that applies what research has measured, such as tap size and contrast, and decides everything else once, so every screen stays consistent.",
     href: "https://ui.kookie.design",
   },
   {
