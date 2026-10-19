@@ -18,7 +18,7 @@ export const PRODUCTS: readonly Product[] = [
   },
   {
     name: "Kookie Flow",
-    blurb: "A node editor for React that stays smooth with thousands of nodes.",
+    blurb: "A node editor for React that draws in WebGL, so it stays smooth with thousands of nodes.",
     href: "https://flow.kookie.design",
   },
   {
