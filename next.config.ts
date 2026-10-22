@@ -25,6 +25,8 @@ const MOVED: [string, string][] = [
 const DOCS_SECTIONS = ["docs", "start", "foundations", "patterns", "ui-test"];
 
 const nextConfig: NextConfig = {
+  // `next dev` otherwise writes an AGENTS.md into the repo. Same setting as kushagradhawan.com.
+  agentRules: false,
   async redirects() {
     return [
       ...MOVED.map(([source, target]) => ({

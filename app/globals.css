@@ -19,3 +19,9 @@ body {
   margin-inline: auto;
   padding-inline: var(--layout-space-6);
 }
+
+/* Base UI's ScrollArea puts an inline `min-width: fit-content` on its content, so a long line
+   would widen the whole page. The page scroller gives that up. Same rule as kushagradhawan.com. */
+.kui-shell-scroll > * > .kui-scroll-content {
+  min-inline-size: 0 !important;
+}

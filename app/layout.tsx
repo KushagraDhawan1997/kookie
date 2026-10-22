@@ -1,12 +1,14 @@
 import "@kushagradhawan/kookie-ui-react/styles.css";
 import "@fontsource-variable/inter/wght.css";
 import "./globals.css";
+import "./accent.css";
 
 import type { Metadata } from "next";
 import { Inter_Tight } from "next/font/google";
 import { Theme } from "@kushagradhawan/kookie-ui-react";
 
 import { appearanceScript } from "./appearance-script";
+import { SiteChrome } from "./site-chrome";
 import { DESCRIPTION, PRODUCTS, SITE_NAME, SITE_URL } from "./site";
 
 const interTight = Inter_Tight({ subsets: ["latin"], variable: "--font-inter-tight" });
@@ -75,7 +77,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <Theme appearance="inherit" size="3" material="3">
-          {children}
+          <SiteChrome>{children}</SiteChrome>
         </Theme>
       </body>
     </html>
