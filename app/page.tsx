@@ -1,5 +1,6 @@
 import { Box, Heading, Link, Page, Stack, Text } from "@kushagradhawan/kookie-ui-react";
 
+import { SiteFooter } from "./footer";
 import { DESCRIPTION, PRODUCTS, SITE_NAME, type Product } from "./site";
 
 const INTRO =
@@ -20,8 +21,8 @@ function ProductRow({ product }: { product: Product }) {
 
 export default function Home() {
   return (
-    <Box py="10" className="column">
-      <Stack gap="11">
+    <Stack gap="10">
+      <Box className="column">
         <Page title={SITE_NAME} description={DESCRIPTION}>
           <Stack gap="10">
             <Text size="4" render={<p />}>
@@ -40,15 +41,8 @@ export default function Home() {
             </Stack>
           </Stack>
         </Page>
-
-        <Text size="2" emphasis="quiet" render={<footer />}>
-          Made by{" "}
-          <Link size="2" href="https://kushagradhawan.com">
-            Kushagra Dhawan
-          </Link>
-          .
-        </Text>
-      </Stack>
-    </Box>
+      </Box>
+      <SiteFooter />
+    </Stack>
   );
 }
