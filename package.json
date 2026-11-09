@@ -15,12 +15,14 @@
     "@kushagradhawan/kookie-ui-react": "file:vendor/kushagradhawan-kookie-ui-react-0.0.0-site.2.tgz",
     "next": "^16.4.1",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react-dom": "^19.3.0",
+    "three": "0.180.0"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@types/three": "0.180.0",
     "typescript": "^6.0.3"
   },
   "packageManager": "pnpm@12.4.1",

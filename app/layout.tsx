@@ -7,6 +7,8 @@ import type { Metadata } from "next";
 import { Inter_Tight } from "next/font/google";
 import { Theme } from "@kushagradhawan/kookie-ui-react";
 
+import { Kookify, listStickers } from "@/kookify";
+
 import { appearanceScript } from "./appearance-script";
 import { SiteChrome } from "./site-chrome";
 import { DESCRIPTION, PRODUCTS, SITE_NAME, SITE_URL } from "./site";
@@ -79,6 +81,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Theme appearance="inherit" size="3" material="3">
           <SiteChrome>{children}</SiteChrome>
         </Theme>
+        <Kookify stickers={listStickers()} words={listStickers("words")} />
       </body>
     </html>
   );
