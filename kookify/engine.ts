@@ -1,12 +1,16 @@
+import Matter from "matter-js";
+// @ts-expect-error -- poly-decomp ships no types; Matter only needs its decomposition functions.
+import decomp from "poly-decomp";
 import * as THREE from "three";
 
 import type { Sound } from "./sound";
 
 /**
- * The Kookify engine: stickers slapped over the page, drawn by Three.js on one transparent
- * canvas that never takes the pointer. Input is read on window in the capture phase and only
- * claimed when it lands on a sticker's opaque pixels, so the page keeps its clicks and scroll.
- * Stickers live in page coordinates and follow whichever element scrolls the page.
+ * The Kookify engine. Stickers drop in from above the screen, fall, tumble and pile up at the
+ * bottom of the viewport, with real 2D physics (matter-js) and Three.js drawing them on one
+ * transparent canvas fixed over the page. The page scrolls behind the pile; the canvas never takes
+ * the pointer. Input is read on window in the capture phase and only claimed when it lands on a
+ * sticker's opaque pixels, so the page keeps its clicks and scroll.
  */
 
 export type Engine = {
@@ -16,124 +20,90 @@ export type Engine = {
   dispose(): void;
 };
 
-type Art = { tex: THREE.Texture; w: number; h: number; alpha: Uint8ClampedArray; aw: number; ah: number };
+type Art = {
+  tex: THREE.Texture;
+  w: number;
+  h: number;
+  alpha: Uint8ClampedArray;
+  aw: number;
+  ah: number;
+  /** The outline of the die-cut, in art pixels, centred on the image's middle. */
+  outline: { x: number; y: number }[];
+};
 
-type State = "wait" | "slap" | "idle" | "held" | "glide" | "fly";
+/** The uniforms each material is made with, so setting them each frame needs no guesswork. */
+type Uniforms<K extends string> = Record<K, THREE.IUniform>;
+type StickerUniform = "uSize" | "uOpacity" | "uBlur" | "uFoil";
+type ShadowUniform = "uSize" | "uOpacity" | "uSpread" | "uBias";
 
 type Sticker = {
   art: Art;
   mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
   shadow: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
-  state: State;
-  /** Centre in page px. */
-  x: number;
-  y: number;
-  rot: number;
-  /** Long side in px when resting. */
-  size: number;
+  body: Matter.Body;
+  /** Display size in px (the art scaled). */
+  w: number;
+  h: number;
+  /** Where the image's middle sits relative to the body's centre of mass, unrotated. */
+  ox: number;
+  oy: number;
   z: number;
-  t0: number;
+  /** When it joins the world, for the staggered drop. */
+  dropAt: number;
+  live: boolean;
   lift: number;
-  curl: number;
-  curlTarget: number;
-  /** Grab point as a fraction of the sticker, y up, from its centre. */
-  gx: number;
-  gy: number;
-  squashAt: number;
-  squashAmp: number;
+  flying: boolean;
   vx: number;
   vy: number;
   vr: number;
+  x: number;
+  y: number;
+  angle: number;
+  flyStart: number;
+  /** The body's state before the last physics step, to draw between steps. */
+  prevX: number;
+  prevY: number;
+  prevA: number;
 };
 
-const SLAP_MS = 95;
-const SQUASH_MS = 65;
+/** How much of the viewport the pile fills, by area, when everything has settled. */
+const PILE_FILL = 0.87;
+const MAX_STICKERS = 80;
+const DROP_MS = 700;
 const HOLD_MS = 300;
-const GLIDE_MAX = 2.4; // px per ms
-const GLIDE_TAU = 70; // ms for momentum to fall to a third
-const LIFT_Z = 60; // px the whole sticker rises toward the viewer while held
-const PEEL_FOLD = 0.16; // how far inside the grab the paper starts to lift, × the short side
-const PEEL_RADIUS = 0.05; // radius of the roll, × the short side
-const LIFT_TAU = 28; // ms; about 100ms to fully lifted
-const Z_STEP = 50;
-
-/**
- * The peel, shared by a sticker and its shadow. Everything beyond a fold line a little inside
- * the grabbed point (toward the sticker's centre) rolls up off the page around a cylinder, then
- * carries on straight, so the held edge lifts toward the viewer and shows its backing.
- * `peelPoint` below is the same maths for one point, used to keep the grab under the pointer.
- */
-const CURL_GLSL = /* glsl */ `
-uniform vec2 uGrab;
-uniform float uCurl;
-uniform float uRadius;
-uniform float uFold;
-vec3 peel(vec2 p, out float angle) {
-  angle = 0.0;
-  if (uCurl < 0.001) return vec3(p, 0.0);
-  vec2 d = normalize(-uGrab);
-  float t = dot(p - uGrab, d);
-  float u = uFold - t;
-  if (u <= 0.0) return vec3(p, 0.0);
-  float amax = uCurl * 2.4;
-  float a = u / uRadius;
-  float tn;
-  float z;
-  if (a <= amax) {
-    tn = uFold - uRadius * sin(a);
-    z = uRadius * (1.0 - cos(a));
-    angle = a;
-  } else {
-    float rest = u - amax * uRadius;
-    tn = uFold - uRadius * sin(amax) - rest * cos(amax);
-    z = uRadius * (1.0 - cos(amax)) + rest * sin(amax);
-    angle = amax;
-  }
-  return vec3(p + d * (tn - t), z);
-}
-`;
+const Z_STEP = 10;
+const WALL = 400;
+const MAX_SPEED = 26; // px per 1/60 s; under 7px per physics step at 240 steps a second
+const IMPACT_SLAP = 4.5; // relative speed (px per step) above which a landing slaps
+const IMPACT_KNOCK = 2;
 
 const STICKER_VERT = /* glsl */ `
 uniform vec2 uSize;
-uniform vec2 uSquash;
-uniform vec2 uEye;
-uniform float uDist;
-uniform float uLift;
 varying vec2 vUv;
-varying float vA;
 varying vec2 vScreen;
-${CURL_GLSL}
 void main() {
   vUv = uv;
-  vec3 q = peel(position.xy * uSize, vA);
-  q.xy *= uSquash;
-  vec4 world = modelMatrix * vec4(q.xy, 0.0, 1.0);
-  // Perspective toward a viewer at the middle of the screen: what lifts off the page grows.
-  float z = q.z + uLift;
-  world.xy = uEye + (world.xy - uEye) * (uDist / (uDist - z));
-  world.z += z;
+  vec4 world = modelMatrix * vec4(position.xy * uSize, 0.0, 1.0);
   vScreen = vec2(world.x, -world.y);
   gl_Position = projectionMatrix * viewMatrix * world;
 }
 `;
 
 /**
- * Holographic film. The art is printed on a pearly silver foil: rainbow bands run in wide
- * diagonal sweeps and faint streaks fan out from the light, and both slide as the light moves.
- * The foil shows through light ink (the border, white fur) and hides under dark ink, so Kookie
- * stays clear. The backing of a peeled edge is brushed silver with a faint rainbow.
+ * Holographic film. The art is printed on a pearly silver foil: rainbow bands and fine rays fan
+ * out from the light, which sits at the pointer; the rays turn and pulse and particles ride them,
+ * so the foil is alive even when the pointer is still. Dark ink covers the foil, so Kookie stays
+ * clear; the border is bare film.
  */
 const STICKER_FRAG = /* glsl */ `
 uniform sampler2D uTex;
 uniform float uOpacity;
 uniform vec2 uBlur;
-uniform float uZoom;
 uniform vec2 uLight;
 uniform float uTime;
 uniform float uPhase;
 uniform float uFoil;
 varying vec2 vUv;
-varying float vA;
 varying vec2 vScreen;
 
 vec3 spectrum(float h) {
@@ -141,22 +111,15 @@ vec3 spectrum(float h) {
   return 0.5 + 0.5 * cos(6.2831853 * (h + vec3(0.0, 0.33, 0.67)));
 }
 
-float hash(float n) { return fract(sin(n) * 43758.5453); }
-
-/**
- * Silver foil at a screen point: brightness streaks like brushed metal catching the light,
- * with an iridescent tint that is faint in general and strong where the light glints.
- */
 float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
-vec3 foil(vec2 q, float shift, out float glint) {
+vec3 foil(vec2 q, out float glint) {
   vec2 rel = q - uLight;
   float dist = length(rel);
   float sweep = dot(q, vec2(0.7071, 0.7071)) / 1100.0;
   float fan = atan(rel.y, rel.x) / 6.2831853;
-  // Fine rays fanning out from the light, irregular like real film: thin, sharp, many.
   // Fine rays fanning out from the light, irregular like real film. They turn slowly,
-  // flicker, and pulse outward, so the foil is alive even when the light holds still.
+  // flicker, and pulse outward.
   float turn = fan + uTime * 0.012;
   float wobble = 0.35 * sin(6.2831853 * (turn * 7.0 + uPhase + uTime * 0.05)) + 0.2 * sin(6.2831853 * turn * 19.0);
   float ray = pow(0.5 + 0.5 * sin(6.2831853 * (turn * 72.0 + wobble)), 10.0);
@@ -166,33 +129,25 @@ vec3 foil(vec2 q, float shift, out float glint) {
   glint = pow(max(0.0, 1.0 - dist / 650.0), 2.5);
   float metal = 0.84 + 0.06 * streak + 0.14 * ray + 0.14 * glint;
   // Whole turns of hue around the light, so the bands never break where the angle wraps.
-  vec3 tint = spectrum(sweep * 3.0 + fan * 2.0 + ray * 0.12 + dist / 1600.0 + uPhase + shift);
+  vec3 tint = spectrum(sweep * 3.0 + fan * 2.0 + ray * 0.12 + dist / 1600.0 + uPhase);
   vec3 film = metal * mix(vec3(1.0), tint, 0.4 + 0.3 * glint + 0.15 * ray);
   // Particles riding out along the rays, twinkling as they go.
   float rad = (dist - uTime * 60.0) / 22.0;
   vec2 pc = vec2(floor(turn * 240.0), floor(rad));
   float ph = hash2(pc);
   vec2 pf = vec2(fract(turn * 240.0), fract(rad)) - 0.5;
-  float dot = smoothstep(0.5, 0.1, length(pf * vec2(1.0, 2.0)));
+  float dotMask = smoothstep(0.5, 0.1, length(pf * vec2(1.0, 2.0)));
   float twinkle = 0.5 + 0.5 * sin(uTime * 7.0 + ph * 40.0);
-  float particle = step(0.982, ph) * dot * twinkle * (1.0 - smoothstep(150.0, 900.0, dist));
+  float particle = step(0.982, ph) * dotMask * twinkle * (1.0 - smoothstep(150.0, 900.0, dist));
   // And a fine scatter of specks across the film, each blinking on its own beat.
-  vec2 cell = floor(q / 1.5);
-  float sh = hash2(cell);
+  float sh = hash2(floor(q / 1.5));
   float speck = step(0.9975, sh) * (0.5 + 0.5 * sin(uTime * 5.0 + sh * 60.0));
   return film + particle * (0.35 + 0.5 * glint) + speck * (0.2 + 0.5 * glint);
 }
 
 void main() {
   vec4 c;
-  bool sharp = false;
-  if (uZoom > 1e-4) {
-    c = vec4(0.0);
-    for (int i = 0; i < 7; i++) {
-      c += texture2D(uTex, (vUv - 0.5) * (1.0 - uZoom * float(i) / 6.0) + 0.5);
-    }
-    c /= 7.0;
-  } else if (dot(uBlur, uBlur) > 1e-7) {
+  if (dot(uBlur, uBlur) > 1e-7) {
     c = vec4(0.0);
     for (int i = 0; i < 7; i++) {
       c += texture2D(uTex, vUv + uBlur * (float(i) / 6.0 - 0.5));
@@ -200,9 +155,6 @@ void main() {
     c /= 7.0;
   } else {
     c = texture2D(uTex, vUv);
-    sharp = true;
-  }
-  if (sharp) {
     // At rest the die-cut edge is resolved to one screen pixel, however far the art is scaled.
     float edge = max(fwidth(c.a), 1e-4);
     float a = clamp((c.a - 0.5) / edge + 0.5, 0.0, 1.0);
@@ -211,38 +163,20 @@ void main() {
   if (c.a < 0.004) discard;
   vec3 col = c.rgb / c.a;
   float glint;
-  if (gl_FrontFacing) {
-    vec3 holo = foil(vScreen, vA * 0.25, glint);
-    float lum = dot(col, vec3(0.299, 0.587, 0.114));
-    // The photo is ink over the foil: light and mid tones let the rainbow film show through,
-    // dark ink (eyes, nose, dark fur) covers it. The border is bare film.
-    float show = smoothstep(0.12, 0.85, lum) * min(uFoil, 1.25);
-    col = mix(col, col * holo * 1.12, 0.85 * show) + glint * show * 0.12;
-    // Turning away from the light as it rolls up.
-    col *= 0.8 + 0.2 * cos(vA);
-  } else {
-    vec3 holo = foil(vScreen, 0.5, glint);
-    float brushed = 0.035 * (hash(floor(vUv.y * 900.0)) - 0.5);
-    vec3 silver = vec3(0.8 + brushed) * mix(vec3(1.0), holo, 0.35);
-    col = silver * (0.82 + 0.14 * -cos(vA)) + glint * 0.18;
-  }
+  vec3 holo = foil(vScreen, glint);
+  float lum = dot(col, vec3(0.299, 0.587, 0.114));
+  float show = smoothstep(0.12, 0.85, lum) * min(uFoil, 1.25);
+  col = mix(col, col * holo * 1.12, 0.85 * show) + glint * show * 0.12;
   gl_FragColor = vec4(min(col, 1.0) * c.a, c.a) * uOpacity;
 }
 `;
 
 const SHADOW_VERT = /* glsl */ `
 uniform vec2 uSize;
-uniform vec2 uSquash;
-uniform vec2 uCast;
 varying vec2 vUv;
-${CURL_GLSL}
 void main() {
   vUv = (uv - 0.5) * 1.35 + 0.5;
-  float angle;
-  // The shadow follows the peel flattened onto the page, pushed further out the higher it lifts.
-  vec3 q = peel(position.xy * uSize * 1.35, angle);
-  vec2 p = (q.xy + uCast * q.z) * uSquash;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 0.0, 1.0);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position.xy * uSize * 1.35, 0.0, 1.0);
 }
 `;
 
@@ -283,22 +217,129 @@ function shuffle<T>(list: T[]): T[] {
   const out = list.slice();
   for (let i = out.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [out[i], out[j]] = [out[j], out[i]];
+    const swap = out[i] as T;
+    out[i] = out[j] as T;
+    out[j] = swap;
   }
   return out;
 }
 
-/** The element that scrolls the page: the document itself, or the app's own scroller. */
-function findScroller(): HTMLElement | null {
-  const root = document.scrollingElement as HTMLElement | null;
-  if (root && root.scrollHeight > root.clientHeight + 1) return null;
-  let el = document.elementFromPoint(innerWidth / 2, innerHeight / 2) as HTMLElement | null;
-  while (el && el !== document.body && el !== document.documentElement) {
-    const { overflowY } = getComputedStyle(el);
-    if (/(auto|scroll|overlay)/.test(overflowY) && el.scrollHeight > el.clientHeight + 1) return el;
-    el = el.parentElement;
+type Pt = { x: number; y: number };
+
+/**
+ * The die-cut's edge, traced around the opaque pixels (Moore neighbour tracing), so a sticker
+ * collides on its real shape, concave bits included, rather than a hull that leaves gaps.
+ */
+function traceOutline(alpha: Uint8ClampedArray, aw: number, ah: number): Pt[] {
+  const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < aw && y < ah && (alpha[y * aw + x] ?? 0) > 128;
+  let start: Pt | null = null;
+  for (let y = 0; y < ah && !start; y++) for (let x = 0; x < aw; x++) if (inside(x, y)) { start = { x, y }; break; }
+  if (!start) return [];
+  // Clockwise on screen (y down): E, SE, S, SW, W, NW, N, NE.
+  const dirs: Pt[] = [{ x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }, { x: -1, y: 1 }, { x: -1, y: 0 }, { x: -1, y: -1 }, { x: 0, y: -1 }, { x: 1, y: -1 }];
+  const out: Pt[] = [start];
+  let cur = start;
+  let back = 4; // we arrived scanning from the west, which is outside
+  for (let guard = 0; guard < aw * ah * 4; guard++) {
+    let found = -1;
+    for (let k = 1; k <= 8; k++) {
+      const d = (back + k) % 8;
+      const step = dirs[d]!;
+      if (inside(cur.x + step.x, cur.y + step.y)) {
+        found = d;
+        break;
+      }
+    }
+    if (found < 0) break;
+    const step = dirs[found]!;
+    const next = { x: cur.x + step.x, y: cur.y + step.y };
+    // The neighbour checked just before the hit was outside; it is the new backtrack.
+    const prev = dirs[(found + 7) % 8]!;
+    const bx = cur.x + prev.x - next.x;
+    const by = cur.y + prev.y - next.y;
+    back = dirs.findIndex((d) => d.x === bx && d.y === by);
+    cur = next;
+    if (cur.x === start.x && cur.y === start.y) break;
+    out.push(cur);
   }
-  return null;
+  return out;
+}
+
+/**
+ * Close narrow notches in a mask (dilate, then erode, by `r` cells). Gaps between legs or
+ * letters are where two stickers' pieces would wedge into each other and stick; filled, the
+ * outline still hugs the outer edge.
+ */
+function closeMask(alpha: Uint8ClampedArray, aw: number, ah: number, r: number): Uint8ClampedArray {
+  const pass = (src: Uint8ClampedArray, grow: boolean) => {
+    const tmp = new Uint8ClampedArray(src.length);
+    const out = new Uint8ClampedArray(src.length);
+    const pick = (a: number, b: number) => (grow ? Math.max(a, b) : Math.min(a, b));
+    for (let y = 0; y < ah; y++) {
+      for (let x = 0; x < aw; x++) {
+        let v = grow ? 0 : 255;
+        for (let k = -r; k <= r; k++) {
+          const xx = x + k;
+          v = pick(v, xx < 0 || xx >= aw ? 0 : (src[y * aw + xx] ?? 0));
+        }
+        tmp[y * aw + x] = v;
+      }
+    }
+    for (let y = 0; y < ah; y++) {
+      for (let x = 0; x < aw; x++) {
+        let v = grow ? 0 : 255;
+        for (let k = -r; k <= r; k++) {
+          const yy = y + k;
+          v = pick(v, yy < 0 || yy >= ah ? 0 : (tmp[yy * aw + x] ?? 0));
+        }
+        out[y * aw + x] = v;
+      }
+    }
+    return out;
+  };
+  // Pad first so growing at the image edge has room, then crop back.
+  const pad = r + 1;
+  const pw = aw + pad * 2;
+  const ph = ah + pad * 2;
+  const padded = new Uint8ClampedArray(pw * ph);
+  for (let y = 0; y < ah; y++) for (let x = 0; x < aw; x++) padded[(y + pad) * pw + x + pad] = alpha[y * aw + x] ?? 0;
+  const save = { aw, ah };
+  aw = pw;
+  ah = ph;
+  const closed = pass(pass(padded, true), false);
+  const out = new Uint8ClampedArray(save.aw * save.ah);
+  for (let y = 0; y < save.ah; y++) for (let x = 0; x < save.aw; x++) out[y * save.aw + x] = closed[(y + pad) * pw + x + pad] ?? 0;
+  return out;
+}
+
+/** Ramer-Douglas-Peucker: drop points that sit within `eps` of the line through their neighbours. */
+function simplify(points: Pt[], eps: number): Pt[] {
+  if (points.length < 4) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+  const stack: [number, number][] = [[0, points.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    const pa = points[a]!;
+    const pb = points[b]!;
+    const len = Math.hypot(pb.x - pa.x, pb.y - pa.y) || 1;
+    let far = -1;
+    let dist = eps;
+    for (let i = a + 1; i < b; i++) {
+      const p = points[i]!;
+      const d = Math.abs((pb.x - pa.x) * (pa.y - p.y) - (pa.x - p.x) * (pb.y - pa.y)) / len;
+      if (d > dist) {
+        dist = d;
+        far = i;
+      }
+    }
+    if (far >= 0) {
+      keep[far] = 1;
+      stack.push([a, far], [far, b]);
+    }
+  }
+  return points.filter((_, i) => keep[i]);
 }
 
 async function loadArt(url: string, loader: THREE.TextureLoader, maxAnisotropy: number): Promise<Art> {
@@ -319,15 +360,28 @@ async function loadArt(url: string, loader: THREE.TextureLoader, maxAnisotropy: 
   ctx.drawImage(img, 0, 0, aw, ah);
   const data = ctx.getImageData(0, 0, aw, ah).data;
   const alpha = new Uint8ClampedArray(aw * ah);
-  for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3];
-  return { tex, w: img.width, h: img.height, alpha, aw, ah };
+  for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3] ?? 0;
+  // The collision outline: the traced edge, simplified to within a pixel of the art, in art
+  // pixels about the middle. Pixel centres sit half a pixel inside the edge; push them out.
+  const traced = simplify(traceOutline(closeMask(alpha, aw, ah, 4), aw, ah), 1.2);
+  const mx = traced.reduce((t, p) => t + p.x, 0) / (traced.length || 1);
+  const my = traced.reduce((t, p) => t + p.y, 0) / (traced.length || 1);
+  const outline = traced.map((p) => {
+    const dx = p.x - mx;
+    const dy = p.y - my;
+    const l = Math.hypot(dx, dy) || 1;
+    const x = p.x + 0.5 + (dx / l) * 0.5;
+    const y = p.y + 0.5 + (dy / l) * 0.5;
+    return { x: (x / aw - 0.5) * img.width, y: (y / ah - 0.5) * img.height };
+  });
+  return { tex, w: img.width, h: img.height, alpha, aw, ah, outline };
 }
 
 export async function createEngine(options: {
   stickers: string[];
-  words?: string[];
+  words?: string[] | undefined;
   reducedMotion: boolean;
-  sound?: Sound;
+  sound?: Sound | undefined;
 }): Promise<Engine> {
   const { reducedMotion, sound } = options;
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: true });
@@ -338,6 +392,7 @@ export async function createEngine(options: {
     Promise.all(options.stickers.map((url) => loadArt(url, loader, anisotropy))),
     Promise.all((options.words ?? []).map((url) => loadArt(url, loader, anisotropy))),
   ]);
+
   renderer.setClearColor(0x000000, 0);
   const canvas = renderer.domElement;
   canvas.setAttribute("aria-hidden", "true");
@@ -360,44 +415,78 @@ export async function createEngine(options: {
   const camera = new THREE.OrthographicCamera(0, 1, 0, -1, 1, 2e6);
   camera.position.z = 1e6;
 
-  // The viewer sits over the middle of the screen; anything lifted off the page is drawn closer.
-  const eye = { value: new THREE.Vector2() };
-  // Where the light is, in viewport px: follows the pointer, or the phone's tilt.
+  // The light's centre sits on the pointer (or finger, or tilt). What moves on its own is the
+  // rays and particles, driven by time.
   const light = { value: new THREE.Vector2(innerWidth * 0.5, innerHeight * 0.2) };
-  // The light's centre sits on the pointer (or finger, or tilt), following it closely. What
-  // moves on its own is the rays and particles, driven by time.
   const aim = new THREE.Vector2(innerWidth * 0.5, innerHeight * 0.2);
   const time = { value: 0 };
-  const dist = { value: 1400 };
+
+  // ---- Physics ------------------------------------------------------------------------------
+
+  // A pile never goes perfectly still under strong gravity; let near-still stickers sleep, so the
+  // heap is done in about a second instead of shivering. (Matter keeps this on the module.)
+  const sleeping = Matter.Sleeping as unknown as { _motionSleepThreshold: number; _motionWakeThreshold: number };
+  sleeping._motionSleepThreshold = 0.16;
+  sleeping._motionWakeThreshold = 0.32;
+
+  // Concave outlines are split into convex pieces by poly-decomp.
+  Matter.Common.setDecomp(decomp);
+
+  const world = Matter.Engine.create({ enableSleeping: true });
+  world.gravity.y = 3.5;
+  // A pile is the hard case for a 2D solver: extra iterations and half steps keep stacked
+  // stickers from sinking into each other.
+  world.positionIterations = 14;
+  world.velocityIterations = 10;
+  let walls: Matter.Body[] = [];
+
+  /** Floor and side walls just outside the viewport; the top stays open for the drop. */
+  function buildWalls() {
+    if (walls.length) Matter.Composite.remove(world.world, walls);
+    const W = innerWidth;
+    const H = innerHeight;
+    const opts = { isStatic: true, friction: 0.6, restitution: 0.1 };
+    walls = [
+      Matter.Bodies.rectangle(W / 2, H + WALL / 2, W + WALL * 2, WALL, opts),
+      Matter.Bodies.rectangle(-WALL / 2, H / 2 - H, WALL, H * 4, opts),
+      Matter.Bodies.rectangle(W + WALL / 2, H / 2 - H, WALL, H * 4, opts),
+    ];
+    Matter.Composite.add(world.world, walls);
+    for (const s of stickers) Matter.Sleeping.set(s.body, false);
+  }
 
   function resize() {
     renderer.setSize(innerWidth, innerHeight, false);
     camera.right = innerWidth;
     camera.bottom = -innerHeight;
     camera.updateProjectionMatrix();
-    eye.value.set(innerWidth / 2, -innerHeight / 2);
-    dist.value = Math.max(innerWidth, innerHeight) * 1.4;
-    dirty = true;
+    buildWalls();
   }
 
-  const geometry = new THREE.PlaneGeometry(1, 1, 48, 48);
-
+  const geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
   let stickers: Sticker[] = [];
   let topZ = 0;
-  let dirty = true;
-  let scroller = findScroller();
   let alive = true;
 
-  const scroll = () => (scroller ? { x: scroller.scrollLeft, y: scroller.scrollTop } : { x: scrollX, y: scrollY });
-
-  function makeSticker(art: Art, x: number, y: number, size: number, rot: number): Sticker {
-    // One set of peel uniforms, shared by the sticker and its shadow so they always agree.
-    const peel = {
-      uGrab: { value: new THREE.Vector2() },
-      uCurl: { value: 0 },
-      uRadius: { value: 1 },
-      uFold: { value: 0 },
-    };
+  function makeSticker(art: Art, x: number, y: number, size: number): Sticker {
+    const k = size / Math.max(art.w, art.h);
+    const w = art.w * k;
+    const h = art.h * k;
+    const verts = art.outline.map((p) => ({ x: p.x * k, y: p.y * k }));
+    const centre = Matter.Vertices.centre(verts);
+    const body = Matter.Bodies.fromVertices(x, y, [verts], {
+      // Grippy and only a little bouncy, so a pile settles in about a second.
+      friction: 0.8,
+      frictionStatic: 1,
+      frictionAir: 0.03,
+      restitution: 0.04,
+      density: 0.0015,
+      slop: 0.5,
+    });
+    body.sleepThreshold = 30;
+    Matter.Body.setAngle(body, rand(-0.6, 0.6));
+    Matter.Body.setAngularVelocity(body, rand(-0.08, 0.08));
+    Matter.Body.setVelocity(body, { x: rand(-2, 2), y: rand(0, 3) });
     const mesh = new THREE.Mesh(
       geometry,
       new THREE.ShaderMaterial({
@@ -405,15 +494,9 @@ export async function createEngine(options: {
         fragmentShader: STICKER_FRAG,
         uniforms: {
           uTex: { value: art.tex },
-          uSize: { value: new THREE.Vector2() },
-          uSquash: { value: new THREE.Vector2(1, 1) },
-          ...peel,
-          uEye: eye,
-          uDist: dist,
-          uLift: { value: 0 },
-          uOpacity: { value: 0 },
+          uSize: { value: new THREE.Vector2(w, h) },
+          uOpacity: { value: 1 },
           uBlur: { value: new THREE.Vector2() },
-          uZoom: { value: 0 },
           uLight: light,
           uTime: time,
           uPhase: { value: Math.random() * 0.4 },
@@ -421,8 +504,8 @@ export async function createEngine(options: {
         },
         transparent: true,
         premultipliedAlpha: true,
-        side: THREE.DoubleSide,
-        depthWrite: true,
+        depthWrite: false,
+        depthTest: false,
       }),
     );
     const shadow = new THREE.Mesh(
@@ -432,135 +515,223 @@ export async function createEngine(options: {
         fragmentShader: SHADOW_FRAG,
         uniforms: {
           uTex: { value: art.tex },
-          uSize: { value: new THREE.Vector2() },
-          uSquash: { value: new THREE.Vector2(1, 1) },
-          ...peel,
-          uCast: { value: new THREE.Vector2() },
-          uOpacity: { value: 0 },
+          uSize: { value: new THREE.Vector2(w, h) },
+          uOpacity: { value: 0.2 },
           uSpread: { value: new THREE.Vector2() },
           uBias: { value: 0 },
         },
         transparent: true,
         premultipliedAlpha: true,
         depthWrite: false,
+        depthTest: false,
       }),
     );
     mesh.frustumCulled = false;
     shadow.frustumCulled = false;
-    scene.add(shadow, mesh);
     topZ += Z_STEP;
+    // A fixed draw order, set here and on a grab only: no ties for the renderer to break
+    // differently from one frame to the next.
+    mesh.renderOrder = topZ;
+    shadow.renderOrder = topZ - 1;
     return {
-      art, mesh, shadow, state: "wait", x, y, rot, size, z: topZ, t0: 0,
-      lift: 0, curl: 0, curlTarget: 0, gx: 0, gy: 0, squashAt: -1e9, squashAmp: 0, vx: 0, vy: 0, vr: 0,
+      art, mesh, shadow, body, w, h, ox: -centre.x, oy: -centre.y, z: topZ, dropAt: 0, live: false,
+      lift: 0, flying: false, vx: 0, vy: 0, vr: 0, x, y, angle: body.angle, flyStart: 0,
+      prevX: x, prevY: y, prevA: body.angle,
     };
   }
 
+  function addToWorld(s: Sticker) {
+    s.live = true;
+    Matter.Composite.add(world.world, s.body);
+    scene.add(s.shadow, s.mesh);
+  }
+
   function removeSticker(s: Sticker) {
+    if (s.live) Matter.Composite.remove(world.world, s.body);
     scene.remove(s.mesh, s.shadow);
     s.mesh.material.dispose();
     s.shadow.material.dispose();
     stickers = stickers.filter((o) => o !== s);
-    dirty = true;
   }
 
-  /** Resting size in px: width and height of the art scaled so its long side is `size`. */
-  function dims(s: Sticker) {
-    const k = s.size / Math.max(s.art.w, s.art.h);
-    return { w: s.art.w * k, h: s.art.h * k };
+  // The cover is made in two parts: most of the stickers drop at once, then a top-up adds a few
+  // more until the settled pile reaches PILE_FILL of the screen. Piles of odd shapes pack
+  // differently every time, so a fixed count would be too short one time and overflow the next.
+  let fill: {
+    base: number;
+    lanes: number;
+    order: number[];
+    pool: Art[];
+    wordPool: Art[];
+    until: number;
+    next: number;
+  } | null = null;
+
+  /** One more sticker, waiting above the screen in the next lane, dropping at `at`. */
+  function queueSticker(at: number) {
+    if (!fill) return;
+    const W = innerWidth;
+    // About one word to every four photos.
+    const word = words.length > 0 && Math.random() < 0.2;
+    if (!fill.pool.length) fill.pool = shuffle(arts);
+    if (!fill.wordPool.length) fill.wordPool = shuffle(words);
+    const art = word ? fill.wordPool.pop()! : fill.pool.pop()!;
+    // Some variety, and now and then a hero.
+    const hero = !word && Math.random() < 0.1;
+    const size = fill.base * (word ? rand(1.2, 1.5) : hero ? rand(1.35, 1.6) : rand(0.8, 1.1));
+    // Drop lanes, used in shuffled rounds, so stickers that drop close together in time drop far
+    // apart in space; several wait per lane, stacked above the screen.
+    if (!fill.order.length) fill.order = shuffle(Array.from({ length: fill.lanes }, (_, l) => l));
+    const lane = fill.order.pop()!;
+    const x = clamp(((lane + 0.5) / fill.lanes) * W + rand(-0.2, 0.2) * (W / fill.lanes), size * 0.5, W - size * 0.5);
+    const s = makeSticker(art, x, -size * rand(0.7, 1.4), size);
+    s.dropAt = at;
+    stickers.push(s);
   }
 
-  /** Cover the viewport edge to edge: a jittered grid tighter than one sticker, landed in random order. */
+  /** The top of the settled part of the pile, in viewport px (the floor if there is none). */
+  function pileTop() {
+    let top = innerHeight;
+    for (const s of stickers) if (s.live && s.body.speed < 1.5) top = Math.min(top, s.body.bounds.min.y);
+    return top;
+  }
+
   function slap() {
     const W = innerWidth;
     const H = innerHeight;
-    const base = clamp(Math.min(W, H) * 0.36, 120, 300);
-    const step = base * 0.5;
-    const cols = Math.ceil(W / step) + 1;
-    const rows = Math.ceil(H / step) + 1;
-    const ox = (W - (cols - 1) * step) / 2;
-    const oy = (H - (rows - 1) * step) / 2;
-    const cells: [number, number][] = [];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        cells.push([ox + c * step + rand(-0.25, 0.25) * step, oy + r * step + rand(-0.25, 0.25) * step]);
-      }
-    }
-    const order = shuffle(cells);
-    let pool: Art[] = [];
-    let wordPool: Art[] = [];
-    const { x: sx, y: sy } = scroll();
+    const base = clamp(Math.min(W, H) * 0.24, 120, 240);
+    // Stickers pile loosely, so each one claims more room than its own area.
+    const estimate = Math.round((W * H * PILE_FILL) / (0.8 * base * base));
     const now = performance.now();
-    const spacing = reducedMotion ? 0 : Math.min(20, 1000 / order.length);
-    order.forEach(([x, y], i) => {
-      if (!pool.length) pool = shuffle(arts);
-      const s = makeSticker(pool.pop()!, x + sx, y + sy, base * rand(0.9, 1.15), rand(-0.38, 0.38));
-      s.t0 = now + i * spacing;
-      stickers.push(s);
-      // About one word to every four photos, on top of the cover so thin words leave no gaps.
-      if (words.length && Math.random() < 0.25) {
-        if (!wordPool.length) wordPool = shuffle(words);
-        const off = step * 0.3;
-        const w = makeSticker(wordPool.pop()!, x + sx + rand(-off, off), y + sy + rand(-off, off), base * rand(1.05, 1.3), rand(-0.3, 0.3));
-        w.t0 = s.t0 + spacing * 0.5;
-        stickers.push(w);
+    fill = {
+      base,
+      lanes: Math.max(2, Math.floor(W / (base * 1.2))),
+      order: [],
+      pool: [],
+      wordPool: [],
+      until: now + 3000,
+      next: now + DROP_MS,
+    };
+    const first = Math.max(8, Math.round(estimate * 0.85));
+    for (let i = 0; i < first; i++) queueSticker(now + (reducedMotion ? 0 : (i / first) * DROP_MS));
+    if (reducedMotion) {
+      // Appear already settled: drop and top up out of sight, then show the pile.
+      stickers.forEach(addToWorld);
+      for (let round = 0; round < 6; round++) {
+        for (let i = 0; i < 240; i++) Matter.Engine.update(world, 1000 / 60);
+        if (pileTop() <= H * (1 - PILE_FILL) || stickers.length >= MAX_STICKERS) break;
+        const more = Math.max(2, Math.round(estimate * 0.1));
+        for (let i = 0; i < more; i++) queueSticker(now);
+        stickers.filter((s) => !s.live).forEach(addToWorld);
       }
-    });
-    // With reduced motion everything lands at once: one slap stands for all of them.
-    if (reducedMotion) sound?.slap();
-    dirty = true;
+      fill = null;
+      sound?.slap();
+    }
+  }
+
+  /** While filling, add a sticker every so often until the pile is tall enough. */
+  function topUp(now: number) {
+    if (!fill || now < fill.next) return;
+    // Stop a little short: the last few are still in the air when the pile is judged.
+    if (now > fill.until || stickers.length >= MAX_STICKERS || pileTop() <= innerHeight * (1 - PILE_FILL + 0.05)) {
+      if (now > fill.until || stickers.length >= MAX_STICKERS) fill = null;
+      return;
+    }
+    // Judge the height only once nothing is still waiting to drop.
+    if (stickers.some((s) => !s.live && !s.flying)) return;
+    // Over the top already: stop.
+    if (pileTop() < innerHeight * 0.05) {
+      fill = null;
+      return;
+    }
+    queueSticker(now);
+    queueSticker(now + 30);
+    fill.next = now + 90;
   }
 
   function clear(): Promise<void> {
-    release(false);
-    if (stickers.length) sound?.whoosh();
+    fill = null;
+    release();
     if (reducedMotion || !stickers.length) {
       stickers.slice().forEach(removeSticker);
       return Promise.resolve();
     }
+    sound?.whoosh();
     const now = performance.now();
-    const { x: sx, y: sy } = scroll();
     for (const s of stickers) {
-      const dx = s.x - sx - innerWidth / 2;
-      const dy = s.y - sy - innerHeight / 2;
+      if (!s.live) {
+        removeSticker(s);
+        continue;
+      }
+      // Off the physics, out of the window: away from the middle, fast.
+      Matter.Composite.remove(world.world, s.body);
+      s.live = false;
+      s.flying = true;
+      s.flyStart = now;
+      const dx = s.x - innerWidth / 2;
+      const dy = s.y - innerHeight / 2;
       const len = Math.hypot(dx, dy) || 1;
       const speed = rand(2.6, 3.6);
       s.vx = (dx / len) * speed;
       s.vy = (dy / len) * speed;
       s.vr = rand(-0.012, 0.012);
-      s.state = "fly";
-      s.t0 = now;
     }
-    dirty = true;
     return new Promise((resolve) => setTimeout(resolve, 520));
   }
+
+  // Thin parts (a letter, a paw) can pass through each other at full falling speed, so nothing
+  // moves faster than a fall the solver can still catch.
+  Matter.Events.on(world, "beforeUpdate", () => {
+    for (const s of stickers) {
+      if (!s.live || s.body.isSleeping) continue;
+      const v = s.body.velocity;
+      const sp = Math.hypot(v.x, v.y);
+      if (sp > MAX_SPEED) Matter.Body.setVelocity(s.body, { x: (v.x / sp) * MAX_SPEED, y: (v.y / sp) * MAX_SPEED });
+      if (Math.abs(s.body.angularVelocity) > 0.25) Matter.Body.setAngularVelocity(s.body, Math.sign(s.body.angularVelocity) * 0.25);
+    }
+  });
+
+  // ---- Sound on impact ---------------------------------------------------------------------
+
+  Matter.Events.on(world, "collisionStart", (event) => {
+    for (const pair of event.pairs) {
+      const a = pair.bodyA;
+      const b = pair.bodyB;
+      const speed = Math.hypot(a.velocity.x - b.velocity.x, a.velocity.y - b.velocity.y);
+      if (a.isStatic || b.isStatic) {
+        if (speed > IMPACT_SLAP) sound?.slap();
+      } else if (speed > IMPACT_KNOCK) {
+        sound?.knock();
+      }
+    }
+  });
 
   // ---- Input -------------------------------------------------------------------------------
 
   /** Topmost sticker whose opaque pixels are under a viewport point. */
   function hitTest(cx: number, cy: number): Sticker | null {
-    const { x: sx, y: sy } = scroll();
-    const ordered = stickers.filter((s) => s.state !== "fly" && s.state !== "wait").sort((a, b) => b.z - a.z);
+    const ordered = stickers.filter((s) => s.live).sort((a, b) => b.z - a.z);
     for (const s of ordered) {
-      const { w, h } = dims(s);
-      const dx = cx - (s.x - sx);
-      const dy = cy - (s.y - sy);
-      const cos = Math.cos(-s.rot);
-      const sin = Math.sin(-s.rot);
+      const cos = Math.cos(-s.angle);
+      const sin = Math.sin(-s.angle);
+      const dx = cx - s.x;
+      const dy = cy - s.y;
       const lx = dx * cos - dy * sin;
       const ly = dx * sin + dy * cos;
-      const u = lx / w + 0.5;
-      const v = ly / h + 0.5;
+      const u = lx / s.w + 0.5;
+      const v = ly / s.h + 0.5;
       if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
-      const a = s.art.alpha[Math.floor(v * s.art.ah) * s.art.aw + Math.floor(u * s.art.aw)];
+      const a = s.art.alpha[Math.floor(v * s.art.ah) * s.art.aw + Math.floor(u * s.art.aw)] ?? 0;
       if (a > 60) return s;
     }
     return null;
   }
 
-  type Held = { s: Sticker; px: number; py: number; samples: { x: number; y: number; t: number }[] };
+  type Held = { s: Sticker; joint: Matter.Constraint };
   let held: Held | null = null;
   let suppressClick = false;
   let suppressTimer = 0;
+  let hovering = false;
 
   /** Swallow the click that follows a grab, but only that one: it never outlives the gesture. */
   function eatNextClick() {
@@ -569,93 +740,44 @@ export async function createEngine(options: {
     suppressTimer = window.setTimeout(() => (suppressClick = false), 400);
   }
 
+  /** A spring from the pointer to the point grabbed, so the sticker follows, shoves, and throws. */
   function grab(s: Sticker, cx: number, cy: number) {
-    const { x: sx, y: sy } = scroll();
-    const { w, h } = dims(s);
-    const dx = cx - (s.x - sx);
-    const dy = cy - (s.y - sy);
-    const cos = Math.cos(-s.rot);
-    const sin = Math.sin(-s.rot);
-    // Normalised grab point in the sticker's own frame, y up to match the shader.
-    s.gx = (dx * cos - dy * sin) / w;
-    s.gy = -(dx * sin + dy * cos) / h;
-    // Near a corner or edge the paper peels; near the middle it only lifts.
-    const reach = Math.max(Math.abs(s.gx), Math.abs(s.gy)) * 2;
-    s.curlTarget = clamp((reach - 0.2) / 0.4, 0, 1);
-    s.state = "held";
-    sound?.peel();
+    const b = s.body;
+    const local = Matter.Vector.rotate({ x: cx - b.position.x, y: cy - b.position.y }, -b.angle);
+    const joint = Matter.Constraint.create({
+      pointA: { x: cx, y: cy },
+      bodyB: b,
+      pointB: Matter.Vector.rotate(local, b.angle),
+      stiffness: 0.25,
+      damping: 0.1,
+      length: 0,
+    });
+    Matter.Composite.add(world.world, joint);
+    Matter.Sleeping.set(b, false);
     topZ += Z_STEP;
     s.z = topZ;
-    held = { s, px: cx, py: cy, samples: [{ x: cx, y: cy, t: performance.now() }] };
+    s.mesh.renderOrder = topZ;
+    s.shadow.renderOrder = topZ - 1;
+    held = { s, joint };
+    sound?.pat();
     document.documentElement.classList.add("kookify-grabbing");
-    dirty = true;
   }
 
   function move(cx: number, cy: number) {
     if (!held) return;
-    held.px = cx;
-    held.py = cy;
-    const now = performance.now();
-    held.samples.push({ x: cx, y: cy, t: now });
-    while (held.samples.length > 2 && now - held.samples[0].t > 90) held.samples.shift();
-    dirty = true;
+    held.joint.pointA = { x: cx, y: cy };
+    Matter.Sleeping.set(held.s.body, false);
   }
 
-  /** Stickers only move, never leave: a release keeps any momentum briefly, then re-sticks. */
-  function release(keepMomentum = true) {
+  function release() {
     if (!held) return;
-    const { s, samples } = held;
+    Matter.Composite.remove(world.world, held.joint);
+    // A hard throw is capped so it can't tunnel through the walls.
+    const v = held.s.body.velocity;
+    const sp = Math.hypot(v.x, v.y);
+    if (sp > MAX_SPEED) Matter.Body.setVelocity(held.s.body, { x: (v.x / sp) * MAX_SPEED, y: (v.y / sp) * MAX_SPEED });
     held = null;
     document.documentElement.classList.remove("kookify-grabbing");
-    const first = samples[0];
-    const last = samples[samples.length - 1];
-    const dt = Math.max(1, last.t - first.t);
-    const fresh = performance.now() - last.t < 60;
-    let vx = keepMomentum && fresh && !reducedMotion ? (last.x - first.x) / dt : 0;
-    let vy = keepMomentum && fresh && !reducedMotion ? (last.y - first.y) / dt : 0;
-    const speed = Math.hypot(vx, vy);
-    if (speed > GLIDE_MAX) {
-      vx *= GLIDE_MAX / speed;
-      vy *= GLIDE_MAX / speed;
-    }
-    s.vx = vx;
-    s.vy = vy;
-    s.state = "glide";
-    dirty = true;
-  }
-
-  /** Where the peel carries the grabbed point: its offset from centre (y up) and its height. */
-  function peelPoint(s: Sticker, w: number, h: number) {
-    const gx = s.gx * w;
-    const gy = s.gy * h;
-    const m = Math.min(w, h);
-    const fold = PEEL_FOLD * m * s.curl;
-    const r = PEEL_RADIUS * m;
-    const len = Math.hypot(gx, gy);
-    if (s.curl < 0.001 || len < 1e-3) return { x: gx, y: gy, z: 0 };
-    const amax = s.curl * 2.4;
-    const a = fold / r;
-    let tn: number;
-    let z: number;
-    if (a <= amax) {
-      tn = fold - r * Math.sin(a);
-      z = r * (1 - Math.cos(a));
-    } else {
-      const rest = fold - amax * r;
-      tn = fold - r * Math.sin(amax) - rest * Math.cos(amax);
-      z = r * (1 - Math.cos(amax)) + rest * Math.sin(amax);
-    }
-    return { x: gx - (gx / len) * tn, y: gy - (gy / len) * tn, z };
-  }
-
-  /** Keep a sticker's centre on screen, so at most half of it hangs past an edge. */
-  function confine(s: Sticker, sx: number, sy: number) {
-    const x = clamp(s.x - sx, 0, innerWidth);
-    const y = clamp(s.y - sy, 0, innerHeight);
-    const hit = x !== s.x - sx || y !== s.y - sy;
-    s.x = x + sx;
-    s.y = y + sy;
-    return hit;
   }
 
   function onPointerDown(e: PointerEvent) {
@@ -671,16 +793,19 @@ export async function createEngine(options: {
 
   function onPointerMove(e: PointerEvent) {
     aim.set(e.clientX, e.clientY);
-    dirty = true;
     if (e.pointerType === "touch") return;
     if (held) return move(e.clientX, e.clientY);
-    document.documentElement.classList.toggle("kookify-grab", !onUi(e) && !!hitTest(e.clientX, e.clientY));
+    // Only touch the page's classes when the answer changes: a class on <html> restyles the page.
+    const over = !onUi(e) && !!hitTest(e.clientX, e.clientY);
+    if (over !== hovering) {
+      hovering = over;
+      document.documentElement.classList.toggle("kookify-grab", over);
+    }
   }
 
   function onPointerUp(e: PointerEvent) {
     if (e.pointerType === "touch" || !held) return;
-    move(e.clientX, e.clientY);
-    release(e.type === "pointerup");
+    release();
   }
 
   function onClick(e: MouseEvent) {
@@ -690,8 +815,9 @@ export async function createEngine(options: {
     e.stopPropagation();
   }
 
-  // Touch: a swipe scrolls as usual; holding still on a sticker for HOLD_MS lifts it.
+  // Touch: a swipe scrolls as usual; holding still on a sticker for HOLD_MS picks it up.
   let pending: { s: Sticker; x: number; y: number; timer: number } | null = null;
+  let touching = false;
 
   function cancelPending() {
     if (!pending) return;
@@ -703,9 +829,9 @@ export async function createEngine(options: {
   function onTouchStart(e: TouchEvent) {
     cancelPending();
     touching = true;
-    if (e.touches[0]) aim.set(e.touches[0].clientX, e.touches[0].clientY);
-    if (e.touches.length !== 1 || held || onUi(e)) return;
     const t = e.touches[0];
+    if (t) aim.set(t.clientX, t.clientY);
+    if (!t || e.touches.length !== 1 || held || onUi(e)) return;
     const s = hitTest(t.clientX, t.clientY);
     if (!s) return;
     document.documentElement.classList.add("kookify-hold");
@@ -717,7 +843,7 @@ export async function createEngine(options: {
         if (!pending) return;
         const p = pending;
         pending = null;
-        if (!stickers.includes(p.s)) return;
+        if (!stickers.includes(p.s) || !p.s.live) return;
         navigator.vibrate?.(8);
         grab(p.s, p.x, p.y);
       }, HOLD_MS),
@@ -741,7 +867,7 @@ export async function createEngine(options: {
     if (!held) return;
     e.preventDefault();
     eatNextClick();
-    release(e.type === "touchend");
+    release();
     document.documentElement.classList.remove("kookify-hold");
   }
 
@@ -749,22 +875,15 @@ export async function createEngine(options: {
     if (pending || held) e.preventDefault();
   }
 
-  // Phones: the light follows a finger while it's down; otherwise tilt moves it, when the
-  // browser shares tilt; otherwise it stays where the last touch left it.
-  let touching = false;
+  // Phones: tilt leans gravity and moves the light, unless a finger is down.
   function onTilt(e: DeviceOrientationEvent) {
-    if (e.beta == null || e.gamma == null || touching) return;
-    aim.set(
-      innerWidth * (0.5 + clamp(e.gamma / 35, -1, 1) * 0.7),
-      innerHeight * (0.5 + clamp((e.beta - 45) / 35, -1, 1) * 0.7),
-    );
-    dirty = true;
-  }
-
-  function onScroll(e: Event) {
-    const target = e.target;
-    if (target instanceof HTMLElement && target.clientHeight > innerHeight * 0.5) scroller = target;
-    dirty = true;
+    if (e.beta == null || e.gamma == null) return;
+    const gx = clamp(e.gamma / 45, -1, 1);
+    const gy = clamp((e.beta - 20) / 45, -0.4, 1);
+    world.gravity.x = gx * 3.5;
+    world.gravity.y = Math.max(1, gy * 3.5);
+    if (!touching) aim.set(innerWidth * (0.5 + gx * 0.7), innerHeight * (0.5 + clamp((e.beta - 45) / 35, -1, 1) * 0.7));
+    for (const s of stickers) if (s.live) Matter.Sleeping.set(s.body, false);
   }
 
   const capture = { capture: true } as const;
@@ -779,13 +898,14 @@ export async function createEngine(options: {
   addEventListener("touchend", onTouchEnd, active);
   addEventListener("touchcancel", onTouchEnd, active);
   addEventListener("contextmenu", onContextMenu, capture);
-  document.addEventListener("scroll", onScroll, { capture: true, passive: true });
   addEventListener("resize", resize);
   addEventListener("deviceorientation", onTilt);
 
   // ---- Frame -------------------------------------------------------------------------------
 
   let last = performance.now();
+  let acc = 0;
+  const STEP = 1000 / 240;
 
   function frame() {
     if (!alive) return;
@@ -793,174 +913,106 @@ export async function createEngine(options: {
     const now = performance.now();
     const dt = Math.min(48, now - last);
     last = now;
-    let animating = false;
-    const { x: sx, y: sy } = scroll();
+
+    topUp(now);
+    // Drop each sticker on time, unless the space above the screen is still occupied; then it
+    // waits a moment, so no two are ever born inside each other.
+    for (const s of stickers) {
+      if (s.live || s.flying || now < s.dropAt) continue;
+      const others = stickers.filter((o) => o.live).map((o) => o.body);
+      if (Matter.Query.collides(s.body, others).length) s.dropAt = now + 20;
+      else addToWorld(s);
+    }
+
+    // Fixed steps, so the pile behaves the same at 60 and 120 Hz.
+    acc += dt;
+    while (acc >= STEP) {
+      for (const s of stickers) {
+        if (!s.live) continue;
+        s.prevX = s.body.position.x;
+        s.prevY = s.body.position.y;
+        s.prevA = s.body.angle;
+      }
+      Matter.Engine.update(world, STEP);
+      acc -= STEP;
+    }
+    // Draw between the last two physics states. A display's frames rarely line up with the
+    // fixed steps (a 120 Hz screen gets one step, then two), and drawing the raw state then
+    // makes every moving sticker judder.
+    const between = acc / STEP;
 
     for (const s of stickers.slice()) {
-      const { w, h } = dims(s);
-      let scale = 1;
-      let opacity = 1;
       let blurX = 0;
       let blurY = 0;
-      let extraDrop = 0;
-      let zoom = 0;
-
-      if (s.state === "wait") {
-        if (now >= s.t0) s.state = "slap";
-        else opacity = 0;
-        animating = true;
-      }
-      if (s.state === "slap") {
-        // Drops in a little too big and blurred, speeding up until it hits. No fade.
-        const k = reducedMotion ? 1 : clamp((now - s.t0) / SLAP_MS, 0, 1);
-        const fall = 1 - k * k;
-        scale = 1 + 0.15 * fall;
-        zoom = 0.07 * fall;
-        extraDrop = 14 * fall;
-        if (k >= 1) {
-          s.state = "idle";
-          if (!reducedMotion) sound?.slap();
-          s.squashAt = now;
-          s.squashAmp = reducedMotion ? 0 : 0.07;
-        }
-        animating = true;
-      }
-      if (s.state === "held") {
-        // Place the sticker so the grabbed point, wherever the peel has carried it, sits exactly
-        // under the pointer: undo the perspective of its height, then the sticker's rotation.
-        const { w: hw, h: hh } = dims(s);
-        const p = peelPoint(s, hw, hh);
-        const lx = p.x;
-        const ly = -p.y;
-        const cos = Math.cos(s.rot);
-        const sin = Math.sin(s.rot);
-        const k = dist.value / (dist.value - (LIFT_Z * s.lift + p.z));
-        const ex = innerWidth / 2;
-        const ey = innerHeight / 2;
-        s.x = ex + (held!.px - ex) / k - (lx * cos - ly * sin) + sx;
-        s.y = ey + (held!.py - ey) / k - (lx * sin + ly * cos) + sy;
-        s.lift += (1 - s.lift) * (1 - Math.exp(-dt / LIFT_TAU));
-        s.curl += (s.curlTarget - s.curl) * (1 - Math.exp(-dt / LIFT_TAU));
-        animating = true;
-      }
-      if (s.state === "glide") {
-        // Momentum dies off fast; then one press back onto the page.
-        const decay = Math.exp(-dt / GLIDE_TAU);
-        s.x += s.vx * GLIDE_TAU * (1 - decay);
-        s.y += s.vy * GLIDE_TAU * (1 - decay);
-        s.vx *= decay;
-        s.vy *= decay;
-        if (confine(s, sx, sy)) {
-          s.vx = 0;
-          s.vy = 0;
-        }
-        const moving = Math.hypot(s.vx, s.vy) > 0.05;
-        if (!moving) {
-          s.lift += (0 - s.lift) * (1 - Math.exp(-dt / 30));
-          s.curl += (0 - s.curl) * (1 - Math.exp(-dt / 30));
-        }
-        if (!moving && s.lift < 0.02 && s.curl < 0.02) {
-          s.lift = 0;
-          s.curl = 0;
-          s.vx = 0;
-          s.vy = 0;
-          s.state = "idle";
-          sound?.pat();
-          s.squashAt = now;
-          s.squashAmp = reducedMotion ? 0 : 0.035;
-        }
-        animating = true;
-      }
-      if (s.state === "fly") {
-        const age = now - s.t0;
+      if (s.flying) {
+        const age = now - s.flyStart;
         const accel = 1 + age / 220;
         s.x += s.vx * dt * accel;
         s.y += s.vy * dt * accel;
-        s.rot += s.vr * dt;
-        s.lift += (0.6 - s.lift) * (1 - Math.exp(-dt / 60));
-        s.curl += (0 - s.curl) * (1 - Math.exp(-dt / 40));
+        s.angle += s.vr * dt;
+        const cos = Math.cos(-s.angle);
+        const sin = Math.sin(-s.angle);
         const vx = s.vx * accel;
         const vy = s.vy * accel;
-        // Motion blur along the flight, in the sticker's own frame.
-        const cos = Math.cos(-s.rot);
-        const sin = Math.sin(-s.rot);
-        const bx = ((vx * cos - vy * sin) * 14) / w;
-        const by = (-(vx * sin + vy * cos) * 14) / h;
+        const bx = ((vx * cos - vy * sin) * 14) / s.w;
+        const by = (-(vx * sin + vy * cos) * 14) / s.h;
         const bl = Math.hypot(bx, by);
         const cap = bl > 0.09 ? 0.09 / bl : 1;
         blurX = bx * cap;
         blurY = by * cap;
-        const vxp = s.x - sx;
-        const vyp = s.y - sy;
-        const off =
-          vxp < -s.size || vxp > innerWidth + s.size || vyp < -s.size || vyp > innerHeight + s.size || age > 1400;
+        const off = s.x < -s.w || s.x > innerWidth + s.w || s.y < -s.h || s.y > innerHeight + s.h || age > 1400;
         if (off) {
           removeSticker(s);
           continue;
         }
-        animating = true;
+      } else if (s.live) {
+        const b = s.body;
+        // A sticker that slipped out of the box (a very hard throw) is put back in from the top.
+        if (b.position.y > innerHeight + 200 || b.position.x < -200 || b.position.x > innerWidth + 200) {
+          Matter.Body.setPosition(b, { x: innerWidth / 2, y: -s.h });
+          Matter.Body.setVelocity(b, { x: 0, y: 0 });
+        }
+        // Where the image's middle is: the body's centre plus the art's offset, rotated.
+        const bx = s.prevX + (b.position.x - s.prevX) * between;
+        const by = s.prevY + (b.position.y - s.prevY) * between;
+        const ba = s.prevA + (b.angle - s.prevA) * between;
+        const off = Matter.Vector.rotate({ x: s.ox, y: s.oy }, ba);
+        s.x = bx + off.x;
+        s.y = by + off.y;
+        s.angle = ba;
+        const isHeld = held?.s === s;
+        s.lift += ((isHeld ? 1 : 0) - s.lift) * (1 - Math.exp(-dt / 40));
+      } else {
+        // Waiting to drop: out of sight above the screen.
+        s.mesh.visible = false;
+        s.shadow.visible = false;
+        continue;
       }
+      s.mesh.visible = true;
+      s.shadow.visible = true;
 
-      let qx = 1;
-      let qy = 1;
-      const q = (now - s.squashAt) / SQUASH_MS;
-      if (q >= 0 && q < 1 && s.squashAmp > 0) {
-        // One sharp squash that eases straight back to flat: no bounce.
-        const e = (1 - q) * (1 - q) * (1 - q);
-        qx = 1 + s.squashAmp * e;
-        qy = 1 - s.squashAmp * e;
-        animating = true;
-      }
-
-      const dw = w * scale;
-      const dh = h * scale;
-      const m = Math.min(dw, dh);
-      const vxp = s.x - sx;
-      const vyp = s.y - sy;
-
-      const u = s.mesh.material.uniforms;
-      u.uSize.value.set(dw, dh);
-      u.uSquash.value.set(qx, qy);
-      u.uGrab.value.set(s.gx * dw, s.gy * dh);
-      u.uCurl.value = s.curl;
-      u.uRadius.value = PEEL_RADIUS * m;
-      u.uFold.value = PEEL_FOLD * m * s.curl;
-      u.uLift.value = LIFT_Z * s.lift;
-      u.uOpacity.value = opacity;
+      const u = s.mesh.material.uniforms as Uniforms<StickerUniform>;
       u.uBlur.value.set(blurX, blurY);
-      u.uZoom.value = zoom;
-      // A held sticker catches the light more as it tips toward the viewer.
-      u.uFoil.value = 1 + 0.6 * s.lift;
-      s.mesh.position.set(vxp, -vyp, s.z);
-      s.mesh.rotation.z = -s.rot;
+      // A held sticker catches the light more.
+      u.uFoil.value = 1 + 0.4 * s.lift;
+      s.mesh.position.set(s.x, -s.y, s.z);
+      s.mesh.rotation.z = -s.angle;
 
-      const blurPx = 5 + 22 * s.lift + extraDrop * 0.5;
-      const offset = 2 + 18 * s.lift + extraDrop;
-      const su = s.shadow.material.uniforms;
-      su.uSize.value.set(dw, dh);
-      su.uSquash.value.set(qx, qy);
-      su.uOpacity.value = opacity * (0.2 + 0.08 * s.lift) * (1 - extraDrop / 44);
-      // Light from above: the higher the peel, the further down its shadow falls.
-      su.uCast.value.set(
-        0.5 * (0.25 * Math.cos(s.rot) + Math.sin(s.rot)),
-        0.5 * (0.25 * Math.sin(s.rot) - Math.cos(s.rot)),
-      );
-      su.uSpread.value.set((blurPx * 0.5) / (dw * 1.35), (blurPx * 0.5) / (dh * 1.35));
-      su.uBias.value = Math.min(2.5, Math.log2(Math.max(1, blurPx / 2)));
-      s.shadow.position.set(vxp + offset * 0.25, -(vyp + offset), s.z - 1);
-      s.shadow.rotation.z = -s.rot;
+      const blurPx = 5 + 18 * s.lift;
+      const offset = 3 + 16 * s.lift;
+      const su = s.shadow.material.uniforms as Uniforms<ShadowUniform>;
+      su.uOpacity.value = 0.18 + 0.08 * s.lift;
+      su.uSpread.value.set((blurPx * 0.5) / (s.w * 1.35), (blurPx * 0.5) / (s.h * 1.35));
+      su.uBias.value = Math.min(1.5, Math.log2(Math.max(1, blurPx / 2)));
+      s.shadow.position.set(s.x + offset * 0.25, -(s.y + offset), s.z - 1);
+      s.shadow.rotation.z = -s.angle;
     }
 
-    // The centre eases onto its aim in about 50ms. The rays and particles keep time on their
-    // own; a hidden tab gets no frames, so they pause with it, and reduced motion holds them.
+    // The light eases onto its aim in about 50ms; rays and particles keep their own time, and
+    // reduced motion holds them still.
     light.value.lerp(aim, 1 - Math.exp(-dt / 50));
     if (!reducedMotion) time.value += dt / 1000;
-    if (stickers.length) animating = true;
-
-    if (animating || dirty) {
-      renderer.render(scene, camera);
-      dirty = false;
-    }
+    renderer.render(scene, camera);
   }
 
   resize();
@@ -968,21 +1020,46 @@ export async function createEngine(options: {
 
   // Dev-only window into sticker placement, for automated checks of grabs at known points.
   if (process.env.NODE_ENV === "development") {
-    (window as unknown as { __kookify?: unknown }).__kookify = () => {
-      const { x: sx, y: sy } = scroll();
-      return stickers
-        .filter((s) => s.state === "idle")
-        .map((s) => ({ x: s.x - sx, y: s.y - sy, rot: s.rot, z: s.z, ...dims(s) }));
+    (window as unknown as { __kookifyArts?: unknown }).__kookifyArts = () =>
+      [...arts, ...words].map((a) => {
+        const poly = a.outline.map((p) => [p.x, p.y]);
+        decomp.makeCCW(poly);
+        return { n: a.outline.length, simple: decomp.isSimple(poly), pieces: decomp.quickDecomp(poly).length };
+      });
+    // How far stickers sink into each other: the deepest overlap and how many pairs exceed 2px.
+    (window as unknown as { __kookifyOverlap?: unknown }).__kookifyOverlap = () => {
+      const bodies = stickers.filter((s) => s.live).map((s) => s.body);
+      let deepest = 0;
+      let over = 0;
+      const where: number[][] = [];
+      for (let i = 0; i < bodies.length; i++) {
+        for (let j = i + 1; j < bodies.length; j++) {
+          let pair = 0;
+          for (const pa of bodies[i]!.parts.slice(1)) {
+            for (const pb of bodies[j]!.parts.slice(1)) {
+              const c = Matter.Collision.collides(pa, pb);
+              if (c) pair = Math.max(pair, c.depth);
+            }
+          }
+          deepest = Math.max(deepest, pair);
+          if (pair > 2) {
+            over++;
+            where.push([Math.round(bodies[i]!.position.x), Math.round(bodies[i]!.position.y), Math.round(pair)]);
+          }
+        }
+      }
+      return { deepest: Math.round(deepest * 10) / 10, over, where };
     };
+    (window as unknown as { __kookify?: unknown }).__kookify = () =>
+      stickers
+        .filter((s) => s.live)
+        .map((s) => ({ x: s.x, y: s.y, rot: s.angle, z: s.z, w: s.w, h: s.h, asleep: s.body.isSleeping, parts: s.body.parts.length - 1, speed: s.body.speed, motion: s.body.motion }));
   }
 
   return {
     slap,
     clear,
-    rescan() {
-      scroller = findScroller();
-      dirty = true;
-    },
+    rescan() {},
     dispose() {
       alive = false;
       cancelPending();
@@ -997,11 +1074,12 @@ export async function createEngine(options: {
       removeEventListener("touchend", onTouchEnd, active);
       removeEventListener("touchcancel", onTouchEnd, active);
       removeEventListener("contextmenu", onContextMenu, capture);
-      document.removeEventListener("scroll", onScroll, { capture: true });
       removeEventListener("resize", resize);
       removeEventListener("deviceorientation", onTilt);
       document.documentElement.classList.remove("kookify-grab", "kookify-grabbing", "kookify-hold");
       stickers.slice().forEach(removeSticker);
+      Matter.World.clear(world.world, false);
+      Matter.Engine.clear(world);
       geometry.dispose();
       [...arts, ...words].forEach((a) => a.tex.dispose());
       renderer.dispose();

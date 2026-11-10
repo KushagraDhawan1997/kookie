@@ -5,6 +5,7 @@
 
 export type Sound = {
   slap(): void;
+  knock(): void;
   peel(): void;
   pat(): void;
   whoosh(): void;
@@ -29,6 +30,7 @@ export function createSound(ctx: AudioContext): Sound {
   }
 
   let lastSlap = -Infinity;
+  let lastKnock = -Infinity;
 
   /** A burst of noise through a band-pass filter, with a fast attack and a set decay. */
   function burst(buffer: AudioBuffer, type: BiquadFilterType, freq: number, q: number, peak: number, decay: number, freqEnd?: number) {
@@ -75,6 +77,13 @@ export function createSound(ctx: AudioContext): Sound {
       lastSlap = now;
       burst(noise, "bandpass", rand(1500, 2600), 0.9, rand(0.05, 0.09), rand(0.03, 0.05));
       thump(rand(120, 170), 0.05, 0.05);
+    },
+    knock() {
+      // Sticker on sticker: a soft, low tap, thinned out the same way as the slaps.
+      const now = performance.now();
+      if (now - lastKnock < rand(45, 90)) return;
+      lastKnock = now;
+      burst(noise, "bandpass", rand(600, 900), 1.1, rand(0.02, 0.035), 0.035);
     },
     peel() {
       burst(crackle, "highpass", 2200, 0.7, 0.14, 0.18);

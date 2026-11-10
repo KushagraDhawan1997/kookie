@@ -126,7 +126,6 @@ export function Kookify({
       title={on ? "Un-Kookify" : "Kookify"}
       onClick={() => (on ? stop() : start())}
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={button} alt="" width={256} height={256} draggable={false} />
     </button>
   );

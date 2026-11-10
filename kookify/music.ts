@@ -16,6 +16,8 @@ const LOOKAHEAD = 0.15;
 const C5 = 523.25;
 const C2 = 65.41;
 const hz = (semitones: number, base: number) => base * Math.pow(2, semitones / 12);
+/** Index into a pattern; every pattern here is sized to its loop, so the slot always exists. */
+const at = <T,>(list: readonly T[], i: number) => list[i % list.length] as T;
 
 type N = number | null;
 
@@ -87,9 +89,9 @@ const TRACKS: Record<TrackId, Track> = {
     play(i, t, len, kit) {
       const bar = Math.floor(i / 8);
       const beat = i % 8;
-      const note = LEAD_0[i];
+      const note = at(LEAD_0, i);
       if (note !== null) kit.squeak(note, t, len * 0.9);
-      kit.bass(ROOTS_0[bar] + [0, 12, 0, 7][beat % 4], t, len * 0.95);
+      kit.bass(at(ROOTS_0, bar) + at([0, 12, 0, 7], beat % 4), t, len * 0.95);
       if (beat === 0 || beat === 4) kit.kick(t);
       if (beat === 2 || beat === 6) kit.clap(t);
       if (beat % 2 === 1) kit.hat(t);
@@ -103,10 +105,10 @@ const TRACKS: Record<TrackId, Track> = {
     play(i, t, len, kit) {
       const bar = Math.floor(i / 8);
       const beat = i % 8;
-      const note = LEAD_A[i];
+      const note = at(LEAD_A, i);
       if (note !== null) kit.squeak(note, t, len * 0.45, 0.055);
       // Oom on the beat, pah on the off-beat: root low, a high fifth short.
-      const root = ROOTS_A[bar];
+      const root = at(ROOTS_A, bar);
       if (beat % 2 === 0) kit.bass(beat % 4 === 0 ? root : root + 19, t, beat % 4 === 0 ? len * 1.6 : len * 0.5);
       if (beat === 0 || beat === 4) kit.kick(t);
       if (beat === 2 || beat === 6) kit.clap(t);
@@ -121,10 +123,10 @@ const TRACKS: Record<TrackId, Track> = {
     play(i, t, len, kit) {
       const bar = Math.floor(i / 8);
       const beat = i % 8;
-      const note = LEAD_B[i];
+      const note = at(LEAD_B, i);
       if (note !== null) kit.kazoo(note, t, len * 1.6);
-      const root = ROOTS_B[bar];
-      if (beat % 2 === 0) kit.bass(root + [0, 7, 12, 10][beat / 2], t, len * 1.7);
+      const root = at(ROOTS_B, bar);
+      if (beat % 2 === 0) kit.bass(root + at([0, 7, 12, 10], beat / 2), t, len * 1.7);
       if (beat === 0 || beat === 3 || beat === 4) kit.kick(t);
       if (beat === 2 || beat === 6) kit.clap(t);
       if (beat % 2 === 1) kit.hat(t);
@@ -141,11 +143,11 @@ const TRACKS: Record<TrackId, Track> = {
     play(i, t, len, kit) {
       const bar = Math.floor(i / 16);
       const pos = i % 16;
-      const chord = CHORDS_C[bar];
-      kit.square(chord[pos % 4] - 12, t, len * 0.9, 0.03);
-      const top = TOP_C[pos];
+      const chord = at(CHORDS_C, bar);
+      kit.square(at(chord, pos % 4) - 12, t, len * 0.9, 0.03);
+      const top = at(TOP_C, pos);
       if (top !== null && bar % 2 === 1) kit.squeak(top - 12, t, len * 1.8, 0.04);
-      if (pos % 2 === 0) kit.bass(chord[0] + (pos % 4 === 0 ? 0 : 12), t, len * 1.8);
+      if (pos % 2 === 0) kit.bass(at(chord, 0) + (pos % 4 === 0 ? 0 : 12), t, len * 1.8);
       if (pos % 4 === 0) kit.kick(t);
       if (pos === 4 || pos === 12) kit.clap(t);
       kit.hat(t, pos % 2 ? 0.014 : 0.022);
