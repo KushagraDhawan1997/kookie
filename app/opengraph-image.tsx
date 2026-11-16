@@ -6,7 +6,7 @@ export const alt = SITE_NAME;
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
-// The K mark from app/icon.svg, drawn in ink on a light ground.
+// The K mark from app/icon.svg, in Bubblegum pink on a light ground.
 export default function OpengraphImage() {
   return new ImageResponse(
     (
@@ -23,8 +23,16 @@ export default function OpengraphImage() {
         }}
       >
         <svg width="96" height="96" viewBox="0 0 64 64">
-          <g transform="translate(13.82 8.00) scale(0.72727)" fill="#111113">
-            <rect width="24" height="50" rx="12" />
+          <defs>
+            <linearGradient id="k" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="66">
+              <stop offset="0" stopColor="#ffdbed" />
+              <stop offset="0.22" stopColor="#f4a0c8" />
+              <stop offset="0.6" stopColor="#db589e" />
+              <stop offset="1" stopColor="#7d1453" />
+            </linearGradient>
+          </defs>
+          <g transform="translate(13.82 8.00) scale(0.72727)" fill="url(#k)">
+            <rect width="24" height="66" rx="12" />
             <path d="M26 12C26 5.37258 31.3726 0 38 0V0C44.6274 0 50 5.37258 50 12V12C50 18.6274 44.6274 24 38 24H26V12Z" />
             <path d="M26 26H30C41.0457 26 50 34.9543 50 46V54C50 60.6274 44.6274 66 38 66V66C31.3726 66 26 60.6274 26 54V26Z" />
           </g>

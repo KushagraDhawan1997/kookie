@@ -29,7 +29,7 @@ export const PRODUCTS: readonly Product[] = [
   },
   {
     // Kookie UI v1, still maintained for Womp. A product in its own right, not a footnote.
-    name: "Womp's Design System",
+    name: "Womp UI",
     blurb: "The React components that every screen in Womp is built from.",
     href: "https://womp-ui.kookie.design",
   },
